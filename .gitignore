@@ -1,0 +1,15 @@
+# Go binaries
+services/fetcher/fetcher
+services/api-gateway/api-gateway
+services/ai-enrich/ai-enrich
+services/ai-enrich/digest
+
+# Node
+frontend/node_modules/
+frontend/.next/
+
+# Misc
+frontend/3000
+.env
+.env.local
+*.rpm

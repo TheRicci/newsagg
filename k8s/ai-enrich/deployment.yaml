@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-enrich
+  labels:
+    app: ai-enrich
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: ai-enrich
+  template:
+    metadata:
+      labels:
+        app: ai-enrich
+    spec:
+      containers:
+      - name: ai-enrich
+        image: newsagg-ai-enrich:v0.2
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8082
+        env:
+        - name: MONGO_URI
+          valueFrom:
+            secretKeyRef:
+              name: mongo-secret
+              key: MONGO_URI
+        - name: RABBITMQ_URI
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret-uri
+              key: RABBITMQ_URI
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gemini-secret
+              key: GEMINI_API_KEY
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-enrich
+spec:
+  selector:
+    app: ai-enrich
+  ports:
+  - port: 80
+    targetPort: 8082
