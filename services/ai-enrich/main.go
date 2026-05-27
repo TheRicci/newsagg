@@ -27,7 +27,6 @@ type Article struct {
 	Summary string        `bson:"summary"       json:"summary"`
 }
 
-// EnrichmentResult is what Gemini returns per article
 type EnrichmentResult struct {
 	Summary    string   `json:"summary"`
 	KeyPoints  []string `json:"key_points"`
@@ -58,7 +57,6 @@ type GeminiResponse struct {
 	} `json:"candidates"`
 }
 
-// BatchResult is the full array Gemini returns
 type BatchResult struct {
 	Index      int              `json:"index"`
 	Enrichment EnrichmentResult `json:"enrichment"`
@@ -73,8 +71,9 @@ var (
 const (
 	batchSize    = 10
 	batchTimeout = 30 * time.Second
-	geminiModel  = "gemini-3.1-flash-lite"
+	geminiModel  = "gemini-2.5-flash"
 	rpmLimit     = 10
+	maxRetries   = 3
 )
 
 func connectMongo() (*mongo.Client, error) {
@@ -113,17 +112,82 @@ func connectRabbitMQ() (*amqp.Connection, *amqp.Channel, error) {
 	if err := ch.Qos(batchSize, 0, false); err != nil {
 		return nil, nil, fmt.Errorf("qos: %w", err)
 	}
-	_, err = ch.QueueDeclare("articles.new", true, false, false, false, nil)
-	if err != nil {
+
+	// 1. dead letter exchange
+	if err := ch.ExchangeDeclare(
+		"articles.dlx", "direct", true, false, false, false, nil,
+	); err != nil {
+		return nil, nil, fmt.Errorf("dlx declare: %w", err)
+	}
+
+	// 2. retry queue — 60s TTL, routes back to articles.new on expiry
+	if _, err := ch.QueueDeclare(
+		"articles.retry", true, false, false, false,
+		amqp.Table{
+			"x-dead-letter-exchange":    "",
+			"x-dead-letter-routing-key": "articles.new",
+			"x-message-ttl":             int32(60000),
+		},
+	); err != nil {
+		return nil, nil, fmt.Errorf("retry queue declare: %w", err)
+	}
+	if err := ch.QueueBind("articles.retry", "articles.retry", "articles.dlx", false, nil); err != nil {
+		return nil, nil, fmt.Errorf("retry queue bind: %w", err)
+	}
+
+	// 3. failed queue — permanent DLQ
+	if _, err := ch.QueueDeclare(
+		"articles.failed", true, false, false, false, nil,
+	); err != nil {
+		return nil, nil, fmt.Errorf("failed queue declare: %w", err)
+	}
+	if err := ch.QueueBind("articles.failed", "articles.failed", "articles.dlx", false, nil); err != nil {
+		return nil, nil, fmt.Errorf("failed queue bind: %w", err)
+	}
+
+	// 4. main queue — routes failures to DLX → retry
+	if _, err := ch.QueueDeclare(
+		"articles.new", true, false, false, false,
+		amqp.Table{
+			"x-dead-letter-exchange":    "articles.dlx",
+			"x-dead-letter-routing-key": "articles.retry",
+		},
+	); err != nil {
 		return nil, nil, fmt.Errorf("queue declare: %w", err)
 	}
-	log.Println("connected to rabbitmq")
+
+	log.Println("connected to rabbitmq, DLQ topology ready")
 	return conn, ch, nil
+}
+
+// retryCount reads the x-death header to count how many times a message has failed
+func retryCount(msg amqp.Delivery) int {
+	deaths, ok := msg.Headers["x-death"]
+	if !ok {
+		return 0
+	}
+	deathList, ok := deaths.([]interface{})
+	if !ok {
+		return 0
+	}
+	total := 0
+	for _, d := range deathList {
+		if table, ok := d.(amqp.Table); ok {
+			if count, ok := table["count"]; ok {
+				switch v := count.(type) {
+				case int64:
+					total += int(v)
+				case int32:
+					total += int(v)
+				}
+			}
+		}
+	}
+	return total
 }
 
 func enrichBatch(articles []Article) (map[int]EnrichmentResult, error) {
 	var prompt bytes.Buffer
-
 	prompt.WriteString("You are a news enrichment assistant.\n")
 	prompt.WriteString("For each article below, fetch the URL and read the full content if accessible.\n")
 	prompt.WriteString("Return as much useful enrichment as you can find.\n\n")
@@ -178,8 +242,6 @@ func enrichBatch(articles []Article) (map[int]EnrichmentResult, error) {
 	}
 
 	text := geminiResp.Candidates[0].Content.Parts[0].Text
-
-	// Strip markdown fences if Gemini ignores our instructions
 	text = string(bytes.TrimSpace([]byte(text)))
 	if strings.HasPrefix(text, "```") {
 		lines := strings.Split(text, "\n")
@@ -188,7 +250,7 @@ func enrichBatch(articles []Article) (map[int]EnrichmentResult, error) {
 
 	var results []BatchResult
 	if err := json.Unmarshal([]byte(text), &results); err != nil {
-		return nil, fmt.Errorf("parse enrichments: %w (raw: %s)", err, string(text))
+		return nil, fmt.Errorf("parse enrichments: %w (raw: %s)", err, text)
 	}
 
 	enrichments := make(map[int]EnrichmentResult)
@@ -222,7 +284,9 @@ func saveEnrichments(articles []Article, enrichments map[int]EnrichmentResult) {
 	}
 }
 
-func collectBatch(deliveries <-chan amqp.Delivery) ([]Article, []amqp.Delivery) {
+// collectBatch collects up to batchSize articles from the queue
+// messages that have failed maxRetries times are sent to articles.failed
+func collectBatch(ch *amqp.Channel, deliveries <-chan amqp.Delivery) ([]Article, []amqp.Delivery) {
 	var articles []Article
 	var msgs []amqp.Delivery
 	deadline := time.After(batchTimeout)
@@ -233,6 +297,22 @@ func collectBatch(deliveries <-chan amqp.Delivery) ([]Article, []amqp.Delivery) 
 			if !ok {
 				return articles, msgs
 			}
+
+			// check retry count — send to failed queue if exceeded
+			count := retryCount(msg)
+			if count >= maxRetries {
+				log.Printf("message exceeded max retries (%d), sending to articles.failed", count)
+				ch.Publish("articles.dlx", "articles.failed", false, false,
+					amqp.Publishing{
+						ContentType:  "application/json",
+						DeliveryMode: amqp.Persistent,
+						Body:         msg.Body,
+					},
+				)
+				msg.Ack(false) // ack original so it leaves articles.new
+				continue
+			}
+
 			var article Article
 			if err := json.Unmarshal(msg.Body, &article); err != nil {
 				log.Printf("failed to unmarshal message: %v", err)
@@ -241,6 +321,7 @@ func collectBatch(deliveries <-chan amqp.Delivery) ([]Article, []amqp.Delivery) 
 			}
 			articles = append(articles, article)
 			msgs = append(msgs, msg)
+
 		case <-deadline:
 			return articles, msgs
 		}
@@ -262,15 +343,14 @@ func runEnrichLoop(ch *amqp.Channel) {
 	ticker := time.NewTicker(time.Minute / time.Duration(rpmLimit))
 	defer ticker.Stop()
 
-	// Exponential backoff state
 	backoff := 30 * time.Second
 	maxBackoff := 10 * time.Minute
 
-	log.Printf("ai-enrich loop started — batch size %d, timeout %s, RPM limit %d",
-		batchSize, batchTimeout, rpmLimit)
+	log.Printf("ai-enrich loop started — batch size %d, timeout %s, RPM limit %d, max retries %d",
+		batchSize, batchTimeout, rpmLimit, maxRetries)
 
 	for {
-		articles, msgs := collectBatch(deliveries)
+		articles, msgs := collectBatch(ch, deliveries)
 		if len(articles) == 0 {
 			continue
 		}
@@ -283,20 +363,17 @@ func runEnrichLoop(ch *amqp.Channel) {
 		if err != nil {
 			log.Printf("gemini error: %v — retrying in %s", err, backoff)
 			time.Sleep(backoff)
-			// Exponential backoff — double each failure, cap at maxBackoff
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
 			for _, msg := range msgs {
-				msg.Nack(false, true)
+				msg.Nack(false, false) // routes to DLX → articles.retry
 			}
 			continue
 		}
 
-		// Reset backoff on success
 		backoff = 30 * time.Second
-
 		saveEnrichments(articles, enrichments)
 
 		for _, msg := range msgs {

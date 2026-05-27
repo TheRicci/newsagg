@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: ai-enrich
-        image: newsagg-ai-enrich:v0.2
+        image: newsagg-ai-enrich:v0.3
         imagePullPolicy: Never
         ports:
         - containerPort: 8082
