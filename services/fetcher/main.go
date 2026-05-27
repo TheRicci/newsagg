@@ -7,13 +7,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/mmcdole/gofeed"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"golang.org/x/net/html"
 )
 
 type Article struct {
@@ -34,12 +36,12 @@ type FeedSource struct {
 }
 
 var sources = []FeedSource{
-	{Topic: "ufology",      Name: "openminds",       URL: "https://openminds.tv/feed"},
-	{Topic: "ufology",      Name: "newsnation",      URL: "https://newsnationnow.com/space/ufo/feed"},
+	//{Topic: "ufology", Name: "mufon", URL: "https://mufon.com/feed"},
+	{Topic: "ufology", Name: "newsnation", URL: "https://newsnationnow.com/space/ufo/feed"},
 	{Topic: "neuroscience", Name: "neurosciencenews", URL: "https://neurosciencenews.com/feed"},
-	{Topic: "neuroscience", Name: "sciencedaily",    URL: "https://www.sciencedaily.com/rss/mind_brain/neuroscience.xml"},
-	{Topic: "finance",      Name: "marketwatch",     URL: "https://feeds.marketwatch.com/marketwatch/topstories"},
-	{Topic: "finance",      Name: "yahoofinance",    URL: "https://finance.yahoo.com/news/rssindex"},
+	{Topic: "neuroscience", Name: "sciencedaily", URL: "https://www.sciencedaily.com/rss/mind_brain/neuroscience.xml"},
+	{Topic: "finance", Name: "marketwatch", URL: "https://feeds.marketwatch.com/marketwatch/topstories"},
+	{Topic: "finance", Name: "yahoofinance", URL: "https://finance.yahoo.com/news/rssindex"},
 }
 
 func connectMongo() (*mongo.Client, error) {
@@ -81,11 +83,11 @@ func connectRabbitMQ() (*amqp.Connection, *amqp.Channel, error) {
 	// Declare the queue — idempotent, safe to call every startup
 	_, err = ch.QueueDeclare(
 		"articles.new", // name
-		true,            // durable — survives RabbitMQ restarts
-		false,           // auto-delete
-		false,           // exclusive
-		false,           // no-wait
-		nil,             // args
+		true,           // durable — survives RabbitMQ restarts
+		false,          // auto-delete
+		false,          // exclusive
+		false,          // no-wait
+		nil,            // args
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("queue declare: %w", err)
@@ -111,16 +113,38 @@ func publishArticle(ch *amqp.Channel, article Article) error {
 	}
 
 	return ch.Publish(
-		"",              // exchange — empty means default direct exchange
-		"articles.new",  // routing key — sends to queue with this name
-		false,           // mandatory
-		false,           // immediate
+		"",             // exchange — empty means default direct exchange
+		"articles.new", // routing key — sends to queue with this name
+		false,          // mandatory
+		false,          // immediate
 		amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent, // survives RabbitMQ restarts
 			Body:         body,
 		},
 	)
+}
+
+// cleanText strips HTML tags and decodes HTML entities from RSS descriptions
+func cleanText(s string) string {
+	if s == "" {
+		return ""
+	}
+	// parse as HTML and extract text nodes only
+	tokenizer := html.NewTokenizer(strings.NewReader(s))
+	var result strings.Builder
+	for {
+		tt := tokenizer.Next()
+		switch tt {
+		case html.ErrorToken:
+			text := strings.TrimSpace(result.String())
+			// collapse multiple spaces and newlines
+			text = strings.Join(strings.Fields(text), " ")
+			return text
+		case html.TextToken:
+			result.Write(tokenizer.Text())
+		}
+	}
 }
 
 func fetchFeed(col *mongo.Collection, ch *amqp.Channel, src FeedSource) {
@@ -143,7 +167,7 @@ func fetchFeed(col *mongo.Collection, ch *amqp.Channel, src FeedSource) {
 			Source:      src.Name,
 			Title:       item.Title,
 			URL:         item.Link,
-			Summary:     item.Description,
+			Summary:     cleanText(item.Description),
 			PublishedAt: published,
 			FetchedAt:   time.Now(),
 		}
