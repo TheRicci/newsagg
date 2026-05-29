@@ -1,0 +1,1 @@
+{"statusCode":405,"headers":{"access-control-allow-headers":"content-type","access-control-allow-methods":"GET,OPTIONS","access-control-allow-origin":"*","content-type":"application/json"},"body":"{\"error\":\"method not allowed\"}","isBase64Encoded":false,"cookies":null}

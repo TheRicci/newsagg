@@ -1,0 +1,13 @@
+.terraform/
+terraform.tfvars
+terraform.tfstate
+terraform.tfstate.backup
+build/
+.gocache/
+.gomodcache/
+gocache*/
+gomodcache/
+frontend-vercel/.next/
+frontend-vercel/node_modules/
+private-docs/
+private/

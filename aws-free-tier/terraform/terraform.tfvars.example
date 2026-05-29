@@ -1,0 +1,22 @@
+aws_region   = "us-east-1"
+project_name = "newsagg"
+environment  = "dev"
+
+# Vercel can call through the existing Next.js rewrite. "*" is convenient for
+# early testing; replace it with your Vercel domain once deployed.
+allowed_cors_origins = ["*"]
+
+# Keep these disabled for the first apply. Enable after checking the resources
+# and confirming the Gemini key is configured.
+enable_fetch_schedule = false
+enable_ai_enrichment  = false
+
+# If this is empty, Terraform will not create the SSM parameter and the enrich
+# Lambda will fail until you create it manually.
+gemini_api_key = ""
+gemini_model   = "gemini-2.5-flash-lite"
+
+# Leave null unless your Lambda account concurrency quota has room for reserved
+# concurrency. Some new AWS accounts cannot reserve concurrency because AWS must
+# keep at least 10 executions unreserved.
+worker_reserved_concurrency = null

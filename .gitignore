@@ -13,3 +13,4 @@ frontend/3000
 .env
 .env.local
 *.rpm
+/aws-free-tier/scripts
