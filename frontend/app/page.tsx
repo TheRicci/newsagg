@@ -52,7 +52,6 @@ export default function Home() {
   }, [])
 
   useEffect(() => {
-    setPage(1)
     fetchArticles(selectedTopic, 1, false)
   }, [selectedTopic, fetchArticles])
 
@@ -63,6 +62,10 @@ export default function Home() {
   }
 
   const handleTopicSelect = (topic: string) => {
+    if (topic === selectedTopic) {
+      return
+    }
+    setPage(1)
     setSelectedTopic(topic)
   }
 

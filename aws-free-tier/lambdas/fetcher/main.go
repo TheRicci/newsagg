@@ -53,7 +53,7 @@ var sources = []FeedSource{
 	{Topic: "neuroscience", Name: "neurosciencenews", URL: "https://neurosciencenews.com/feed"},
 	{Topic: "neuroscience", Name: "sciencedaily", URL: "https://www.sciencedaily.com/rss/mind_brain/neuroscience.xml"},
 	{Topic: "finance", Name: "marketwatch", URL: "https://feeds.marketwatch.com/marketwatch/topstories"},
-	{Topic: "finance", Name: "yahoofinance", URL: "https://finance.yahoo.com/news/rssindex"},
+	//{Topic: "finance", Name: "yahoofinance", URL: "https://finance.yahoo.com/news/rssindex"},
 }
 
 var (

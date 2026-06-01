@@ -35,12 +35,14 @@ run the local Go build step.
 
 Defines configurable inputs: AWS region, project/environment names, CORS
 origins, schedule enablement, enrichment enablement, Gemini model/key, Lambda
-memory sizes, and optional worker reserved concurrency.
+memory sizes, optional worker reserved concurrency, and the Python command used
+by the local Lambda build step.
 
 `main.tf`
 
 Builds shared local names and paths, such as the project prefix, Lambda source
-directories, build output directory, and SSM parameter name for Gemini.
+directories, build output directory, Python build script path, and SSM
+parameter name for Gemini.
 
 `dynamodb.tf`
 
@@ -81,6 +83,9 @@ enrich   consumes SQS batches, calls Gemini, updates DynamoDB
 
 It also creates the public Lambda Function URL used by Vercel and the SQS event
 source mapping for enrichment.
+
+The local build step calls `scripts/build-lambda.py`, which cross-compiles each
+Go Lambda to a Linux arm64 `bootstrap` binary for the custom runtime.
 
 The Function URL CORS config allows `GET`. Do not add `OPTIONS` there; Lambda
 Function URL CORS validation rejects it even though the function handler can

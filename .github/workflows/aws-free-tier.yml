@@ -1,0 +1,184 @@
+name: AWS free-tier CI/CD
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-free-tier-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.22.x"
+  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.12"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TERRAFORM_DIR: aws-free-tier/terraform
+
+jobs:
+  test:
+    name: Test and validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            services/*/go.sum
+            aws-free-tier/lambdas/*/go.sum
+
+      - name: Test Go modules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for module in \
+            services/api-gateway \
+            services/fetcher \
+            services/ai-enrich \
+            aws-free-tier/lambdas/api \
+            aws-free-tier/lambdas/fetcher \
+            aws-free-tier/lambdas/enrich
+          do
+            echo "::group::go test $module"
+            (cd "$module" && go test ./...)
+            echo "::endgroup::"
+          done
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Check local Kubernetes frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Check AWS/Vercel frontend
+        working-directory: aws-free-tier/frontend-vercel
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Check Terraform formatting
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Validate Terraform
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  deploy-aws:
+    name: Deploy AWS free-tier stack
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TF_TOKEN_app_terraform_io: ${{ secrets.TF_TOKEN_APP_TERRAFORM_IO }}
+      ENABLE_FETCH_SCHEDULE: ${{ vars.ENABLE_FETCH_SCHEDULE }}
+      ENABLE_AI_ENRICHMENT: ${{ vars.ENABLE_AI_ENRICHMENT }}
+      ALLOWED_CORS_ORIGINS: ${{ vars.ALLOWED_CORS_ORIGINS || '["*"]' }}
+      TF_VAR_gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: aws-free-tier/lambdas/*/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials with OIDC
+        if: env.AWS_ROLE_TO_ASSUME != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+
+      - name: Configure AWS credentials with access keys
+        if: env.AWS_ROLE_TO_ASSUME == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Deploy Terraform
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          require_env() {
+            local name="$1"
+            local label="$2"
+            if [ -z "${!name:-}" ]; then
+              echo "Set the $label before deploying." >&2
+              exit 1
+            fi
+          }
+
+          require_env TF_TOKEN_app_terraform_io "TF_TOKEN_APP_TERRAFORM_IO repository secret"
+          require_env TF_VAR_gemini_api_key "GEMINI_API_KEY repository secret"
+          require_env ENABLE_FETCH_SCHEDULE "ENABLE_FETCH_SCHEDULE repository variable"
+          require_env ENABLE_AI_ENRICHMENT "ENABLE_AI_ENRICHMENT repository variable"
+
+          case "$ENABLE_FETCH_SCHEDULE" in
+            true|false) ;;
+            *) echo "ENABLE_FETCH_SCHEDULE must be either true or false." >&2; exit 1 ;;
+          esac
+
+          case "$ENABLE_AI_ENRICHMENT" in
+            true|false) ;;
+            *) echo "ENABLE_AI_ENRICHMENT must be either true or false." >&2; exit 1 ;;
+          esac
+
+          terraform init
+
+          terraform apply -auto-approve \
+            -var="aws_region=$AWS_REGION" \
+            -var="enable_fetch_schedule=$ENABLE_FETCH_SCHEDULE" \
+            -var="enable_ai_enrichment=$ENABLE_AI_ENRICHMENT" \
+            -var="allowed_cors_origins=$ALLOWED_CORS_ORIGINS"
+
+          terraform output

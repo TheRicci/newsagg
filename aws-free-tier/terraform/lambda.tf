@@ -8,8 +8,7 @@ resource "null_resource" "build_lambda" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["PowerShell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
-    command     = "& '${local.build_script}' -SourceDir '${each.value}' -OutputDir '${local.build_root}/${each.key}'"
+    command = "\"${var.lambda_build_python_command}\" \"${local.build_script}\" --source-dir \"${each.value}\" --output-dir \"${local.build_root}/${each.key}\""
   }
 }
 

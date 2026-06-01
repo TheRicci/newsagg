@@ -1,6 +1,14 @@
 terraform {
   required_version = ">= 1.6.0"
 
+  cloud {
+    organization = "newsagg"
+
+    workspaces {
+      name = "newsagg-dev"
+    }
+  }
+
   required_providers {
     archive = {
       source  = "hashicorp/archive"

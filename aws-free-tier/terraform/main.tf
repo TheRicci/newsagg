@@ -5,7 +5,7 @@ locals {
   fetcher_source = abspath("${path.module}/../lambdas/fetcher")
   enrich_source  = abspath("${path.module}/../lambdas/enrich")
   build_root     = abspath("${path.module}/../build")
-  build_script   = abspath("${path.module}/../scripts/build-lambda.ps1")
+  build_script   = abspath("${path.module}/../scripts/build-lambda.py")
 
   lambda_sources = {
     api     = local.api_source

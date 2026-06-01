@@ -35,7 +35,7 @@ variable "allowed_cors_origins" {
 variable "fetch_schedule_expression" {
   description = "EventBridge Scheduler expression for RSS fetching."
   type        = string
-  default     = "rate(30 minutes)"
+  default     = "rate(90 minutes)"
 }
 
 variable "enable_fetch_schedule" {
@@ -79,4 +79,10 @@ variable "worker_reserved_concurrency" {
   description = "Optional reserved concurrency for fetcher and enrichment Lambdas. Leave null for AWS accounts with low concurrency quotas."
   type        = number
   default     = null
+}
+
+variable "lambda_build_python_command" {
+  description = "Python command used by Terraform local-exec to build Go Lambda packages."
+  type        = string
+  default     = "python"
 }

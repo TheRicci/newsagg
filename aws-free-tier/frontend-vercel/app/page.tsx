@@ -76,9 +76,16 @@ export default function Home() {
   }, [])
 
   useEffect(() => {
-    setPage(1)
     fetchArticles(selectedTopic, 1, false)
   }, [selectedTopic, fetchArticles])
+
+  const handleTopicSelect = (topic: string) => {
+    if (topic === selectedTopic) {
+      return
+    }
+    setPage(1)
+    setSelectedTopic(topic)
+  }
 
   const loadMore = () => {
     const nextPage = page + 1
@@ -94,7 +101,7 @@ export default function Home() {
           <p className="text-sm text-zinc-500">ufology / neuroscience / finance</p>
         </header>
 
-        <TopicFilter topics={topics} selected={selectedTopic} onSelect={setSelectedTopic} />
+        <TopicFilter topics={topics} selected={selectedTopic} onSelect={handleTopicSelect} />
 
         {error && (
           <div className="mb-4 rounded border border-red-900 bg-red-950 px-4 py-3 text-sm text-red-200">
@@ -126,4 +133,3 @@ export default function Home() {
     </main>
   )
 }
-

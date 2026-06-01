@@ -1,4 +1,5 @@
 .terraform/
+backend.tf
 terraform.tfvars
 terraform.tfstate
 terraform.tfstate.backup
@@ -9,5 +10,6 @@ gocache*/
 gomodcache/
 frontend-vercel/.next/
 frontend-vercel/node_modules/
+frontend-vercel/next-env.d.ts
 private-docs/
 private/
