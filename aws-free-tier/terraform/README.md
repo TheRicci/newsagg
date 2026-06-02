@@ -2,6 +2,10 @@
 
 This folder provisions the AWS side of the cloud version.
 
+Terraform uses the `cloud` block in `versions.tf` to store state in HCP
+Terraform. The CLI still runs locally or in GitHub Actions because the stack
+builds Lambda artifacts from local Go source before uploading them.
+
 ## What It Creates
 
 ```text
@@ -16,6 +20,23 @@ EventBridge Scheduler
   -> SQS dead-letter queue
 ```
 
+## State And Build Flow
+
+```mermaid
+sequenceDiagram
+  participant CLI as Terraform CLI
+  participant HCP as HCP Terraform state
+  participant Build as Python build helper
+  participant AWS as AWS account
+
+  CLI->>HCP: Read current workspace state
+  CLI->>AWS: Refresh existing resources
+  CLI->>Build: Compile Go Lambdas to Linux arm64 bootstrap files
+  Build-->>CLI: Lambda zip inputs
+  CLI->>AWS: Create or update AWS resources
+  CLI->>HCP: Write new state version
+```
+
 The first apply should keep scheduled fetching and enrichment disabled:
 
 ```hcl
@@ -27,9 +48,9 @@ enable_ai_enrichment  = false
 
 `versions.tf`
 
-Declares Terraform and provider versions. It uses the AWS provider for
-resources, the archive provider to zip Lambda binaries, and the null provider to
-run the local Go build step.
+Declares Terraform, HCP Terraform workspace configuration, and provider
+versions. It uses the AWS provider for resources, the archive provider to zip
+Lambda binaries, and the null provider to run the local Go build step.
 
 `variables.tf`
 

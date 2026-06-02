@@ -1,72 +1,133 @@
 # newsagg
 
-A self-hosted personal news aggregator that fetches articles from RSS feeds, stores them in MongoDB, enriches them with AI-generated summaries via the Gemini API, and serves them through a clean Next.js frontend — all running inside a local Kubernetes cluster.
+`newsagg` is a personal news aggregator that collects RSS articles, stores them,
+enriches them with Gemini-generated context, and serves them through a Next.js
+frontend.
 
----
+The repository now has two architecture versions:
 
-## Architecture
+- **Local version**: k3d/Kubernetes with MongoDB, RabbitMQ, Go services, and
+  a Next.js frontend.
+- **Cloud version**: Vercel frontend plus an AWS free-tier-oriented serverless
+  stack using Lambda, DynamoDB, SQS, EventBridge Scheduler, SSM, HCP Terraform,
+  and GitHub Actions.
 
+The local project remains the original self-hosted environment. The cloud
+project lives in [`aws-free-tier/`](aws-free-tier/README.md).
+
+## Architecture Overview
+
+```mermaid
+flowchart LR
+  subgraph Local["Local k3d / Kubernetes"]
+    LBrowser["Browser"] --> LIngress["Traefik Ingress"]
+    LIngress --> LFrontend["Next.js frontend pod"]
+    LFrontend --> LAPI["Go api-gateway pod"]
+    LAPI --> LMongo["MongoDB"]
+    LFetcher["Go fetcher pod"] --> LRSS["RSS feeds"]
+    LFetcher --> LMongo
+    LFetcher --> LRabbit["RabbitMQ articles.new"]
+    LRabbit --> LEnrich["Go ai-enrich pod"]
+    LEnrich --> LGemini["Gemini API"]
+    LEnrich --> LMongo
+  end
+
+  subgraph Cloud["AWS + Vercel"]
+    CBrowser["Browser"] --> CVercel["Vercel Next.js frontend"]
+    CVercel --> CUrl["Lambda Function URL"]
+    CUrl --> CAPI["Go API Lambda"]
+    CAPI --> CDDB["DynamoDB articles + topic counts"]
+    CScheduler["EventBridge Scheduler"] --> CFetcher["Go fetcher Lambda"]
+    CFetcher --> CRSS["RSS feeds"]
+    CFetcher --> CDDB
+    CFetcher --> CSQS["SQS articles queue"]
+    CSQS --> CEnrich["Go ai-enrich Lambda"]
+    CEnrich --> CSSM["SSM Gemini parameter"]
+    CEnrich --> CGemini["Gemini API"]
+    CEnrich --> CDDB
+  end
 ```
-Browser
-  │
-  │  http://localhost
-  ▼
-k3d LoadBalancer (nginx)
-  │
-  ▼
-Traefik Ingress Controller
-  │
-  ├── localhost          → frontend (Next.js)
-  └── rabbitmq.localhost → RabbitMQ Management UI
-          │
-          ▼
-    frontend pod
-          │  /api/* proxy
-          ▼
-    api-gateway pod (Go)
-          │
-          ▼
-    MongoDB
 
+## Local Kubernetes Version
 
-Independently running:
+The local version is designed for a self-hosted development cluster. It keeps
+state in MongoDB and uses RabbitMQ as the async boundary between article
+ingestion and AI enrichment.
 
-fetcher pod (Go)
-  ├── polls 6 RSS feeds every 30 minutes
-  ├── saves new articles to MongoDB
-  └── publishes new article events to RabbitMQ
+### Local Request Flow
 
-ai-enrich pod (Go)
-  ├── consumes from RabbitMQ in batches of 10
-  ├── calls Gemini API to enrich each article
-  │     (summary, key points, context, tags, confidence)
-  └── saves enrichment back to MongoDB
+```mermaid
+sequenceDiagram
+  participant User as Browser
+  participant Ingress as Traefik Ingress
+  participant Frontend as frontend pod
+  participant API as api-gateway pod
+  participant Mongo as MongoDB
+
+  User->>Ingress: GET http://localhost
+  Ingress->>Frontend: Serve Next.js UI
+  Frontend->>API: /api/topics or /api/articles
+  API->>Mongo: Query articles and topic counts
+  Mongo-->>API: Results
+  API-->>Frontend: JSON response
+  Frontend-->>User: Render articles and enrichment
 ```
 
----
+### Local Background Flow
 
-## Services
+```mermaid
+sequenceDiagram
+  participant Fetcher as fetcher pod
+  participant RSS as RSS feeds
+  participant Mongo as MongoDB
+  participant Rabbit as RabbitMQ
+  participant Enrich as ai-enrich pod
+  participant Gemini as Gemini API
 
-| Service | Language | Port | Description |
-|---|---|---|---|
-| frontend | Next.js / TypeScript | 3000 | UI — article list, topic filter, AI enrichment cards |
-| api-gateway | Go | 8081 | REST API — serves articles and topics from MongoDB |
-| fetcher | Go | 8080 | RSS poller — fetches 6 feeds every 30 minutes |
-| ai-enrich | Go | 8082 | AI enricher — batches articles through Gemini API |
-| mongo | MongoDB 7 | 27017 | Primary data store |
-| rabbitmq | RabbitMQ 3 | 5672 / 15672 | Message queue between fetcher and ai-enrich |
+  loop Every 30 minutes
+    Fetcher->>RSS: Read configured feeds
+    Fetcher->>Mongo: Insert new articles
+    Fetcher->>Rabbit: Publish article event to articles.new
+  end
 
----
+  Enrich->>Rabbit: Consume up to 10 articles
+  Enrich->>Gemini: Request structured enrichment
+  Gemini-->>Enrich: Summary, context, tags, confidence
+  Enrich->>Mongo: Save enrichment fields
+  Enrich->>Rabbit: Ack successful messages
+```
 
-## MongoDB Document Structure
+### Local Services
+
+| Service | Runtime | Role |
+|---|---|---|
+| `frontend` | Next.js / TypeScript | Browser UI, topic filtering, article cards, AI enrichment display |
+| `api-gateway` | Go + chi | REST API for articles, topics, health checks |
+| `fetcher` | Go | Polls RSS feeds, inserts new MongoDB articles, publishes RabbitMQ messages |
+| `ai-enrich` | Go | Consumes RabbitMQ batches, calls Gemini, updates MongoDB |
+| `mongo` | MongoDB 7 | Local article and enrichment store |
+| `rabbitmq` | RabbitMQ 3 | Queue between fetcher and AI enrichment worker |
+
+### API Endpoints
+
+```text
+GET /health
+GET /topics
+GET /articles
+GET /articles?topic=ufology
+GET /articles?topic=finance&limit=20&page=2
+GET /articles/{id}
+```
+
+### MongoDB Article Shape
 
 ```json
 {
   "_id": "ObjectId",
   "topic": "ufology | neuroscience | finance",
-  "source": "openminds | newsnation | ...",
+  "source": "feed source",
   "title": "Article headline",
-  "url": "https://source.com/article",
+  "url": "https://source.example/article",
   "summary": "Original RSS teaser text",
   "published_at": "2026-05-21T10:00:00Z",
   "fetched_at": "2026-05-21T10:30:00Z",
@@ -79,43 +140,27 @@ ai-enrich pod (Go)
 }
 ```
 
----
+## Local Setup
 
-## API Endpoints
+### Prerequisites
 
-```
-GET /health                              → service health check
-GET /topics                             → list topics with article counts
-GET /articles                           → paginated article list
-GET /articles?topic=ufology             → filter by topic
-GET /articles?topic=finance&limit=20&page=2
-GET /articles/:id                       → single article by ID
-```
+- Docker
+- k3d
+- kubectl
+- Go
+- Node.js
+- Gemini API key
 
----
+### Create The k3d Cluster
 
-## Infrastructure
-
-### Kubernetes Resources
-
-```
-k8s/
-├── infra/
-│   ├── mongo-deployment.yaml    → MongoDB + PVC + Service + NodePort
-│   └── rabbitmq.yaml            → RabbitMQ + PVC + Service
-├── fetcher/
-│   ├── deployment.yaml
-│   └── service.yaml
-├── api-gateway/
-│   └── deployment.yaml          → Deployment + Service
-├── frontend/
-│   ├── deployment.yaml          → Deployment + Service
-│   └── ingress.yaml             → Traefik Ingress rules
-└── ai-enrich/
-    └── deployment.yaml          → Deployment + Service
+```bash
+k3d cluster create mycluster \
+  --port "80:80@loadbalancer" \
+  --port "443:443@loadbalancer" \
+  --port "30017:30017@server:0"
 ```
 
-### Kubernetes Secrets Required
+### Create Kubernetes Secrets
 
 ```bash
 kubectl create secret generic mongo-secret \
@@ -132,41 +177,7 @@ kubectl create secret generic gemini-secret \
   --from-literal=GEMINI_API_KEY=your-key-here
 ```
 
----
-
-## Local Development Setup
-
-### Prerequisites
-
-- Docker
-- k3d
-- kubectl
-- Go 1.26+
-- Node.js 22+
-
-### Create the cluster
-
-```bash
-k3d cluster create mycluster \
-  --port "80:80@loadbalancer" \
-  --port "443:443@loadbalancer" \
-  --port "30017:30017@server:0"
-```
-
-### Import images
-
-```bash
-k3d image import \
-  newsagg-fetcher:v0.4 \
-  newsagg-api-gateway:v0.2 \
-  newsagg-frontend:v0.3 \
-  newsagg-ai-enrich:v0.2 \
-  -c mycluster
-```
-
-### Create secrets (see above)
-
-### Deploy
+### Deploy Local Kubernetes Resources
 
 ```bash
 kubectl apply -f k8s/infra/
@@ -174,81 +185,80 @@ kubectl apply -f k8s/fetcher/
 kubectl apply -f k8s/api-gateway/
 kubectl apply -f k8s/frontend/
 kubectl apply -f k8s/ai-enrich/
-kubectl scale deployment/ai-enrich --replicas=1
 ```
 
-### Access
+### Access Local Services
 
-| URL | What |
+| URL | Purpose |
 |---|---|
-| http://localhost | News aggregator UI |
-| http://rabbitmq.localhost | RabbitMQ management UI |
-| mongodb://localhost:30017 | MongoDB (Compass or mongosh) |
+| `http://localhost` | News aggregator UI |
+| `http://rabbitmq.localhost` | RabbitMQ management UI |
+| `mongodb://localhost:30017` | MongoDB access from Compass or `mongosh` |
 
-Add to `/etc/hosts` for RabbitMQ hostname routing:
-```
+For RabbitMQ hostname routing, add this to your hosts file:
+
+```text
 127.0.0.1 rabbitmq.localhost
 ```
 
----
-
-## Building a Service
+## Build And Update A Local Service
 
 ```bash
-# 1. build
 cd services/<name>
 docker build -t newsagg-<name>:vX.Y .
-
-# 2. import into cluster
 k3d image import newsagg-<name>:vX.Y -c mycluster
-
-# 3. deploy
 kubectl set image deployment/<name> <name>=newsagg-<name>:vX.Y
 kubectl rollout status deployment/<name>
-
-# 4. check logs
 kubectl logs -f deployment/<name>
 ```
 
----
+## Cloud Version
 
-## Stopping and Resuming
+The cloud version keeps the same product idea but replaces local Kubernetes
+infrastructure with serverless/free-tier-friendly services:
 
-```bash
-# stop (saves state)
-k3d cluster stop mycluster
+| Local | Cloud |
+|---|---|
+| k3d + Kubernetes | Terraform-managed AWS resources |
+| frontend pod | Vercel Next.js deployment |
+| Go api-gateway pod | Go API Lambda behind Lambda Function URL |
+| MongoDB | DynamoDB tables |
+| RabbitMQ queue | SQS queue and DLQ |
+| fetcher pod | EventBridge-scheduled fetcher Lambda |
+| ai-enrich pod | SQS-triggered enrich Lambda |
+| Kubernetes secrets | SSM Parameter Store + GitHub/Vercel secrets |
 
-# resume
-k3d cluster start mycluster
-kubectl get pods
+Read the cloud documentation here:
+
+```text
+aws-free-tier/README.md
+aws-free-tier/terraform/README.md
 ```
 
----
+## Repository Structure
 
-## AI Enrichment
-
-The `ai-enrich` service consumes articles from the `articles.new` RabbitMQ queue in batches:
-
-- **Batch size**: 10 articles per Gemini API call
-- **Batch timeout**: 30 seconds (sends partial batch if queue is slow)
-- **Rate limit**: 10 RPM (Gemini 2.5 Flash-Lite free tier)
-- **Model**: `gemini-2.5-flash-lite` (15 RPM, 1000 RPD free tier)
-- **Retry**: exponential backoff starting at 30s, capped at 10 minutes
-- **Ack strategy**: manual — messages only acknowledged after successful save
-
-Gemini enriches each article by fetching the URL when accessible, returning structured JSON with summary, key points, context, tags, and a confidence level (high/medium/low).
-
----
-
-## Project Structure
-
+```text
+newsagg-k8s/
+  frontend/                 Local Kubernetes Next.js frontend
+  services/
+    api-gateway/            Local Go REST API
+    fetcher/                Local Go RSS fetcher
+    ai-enrich/              Local Go Gemini enrichment worker
+  k8s/                      Local Kubernetes manifests
+  aws-free-tier/
+    frontend-vercel/        Vercel-ready Next.js frontend
+    lambdas/                AWS Go Lambda services
+    terraform/              AWS infrastructure as code
+    scripts/                Cross-platform Lambda build helper
+  .github/workflows/        CI/CD workflow for tests and AWS deploy
 ```
-newsagg/
-├── services/
-│   ├── fetcher/         Go — RSS poller
-│   ├── api-gateway/     Go — REST API
-│   └── ai-enrich/       Go — Gemini enrichment worker
-├── frontend/            Next.js — UI
-├── k8s/                 Kubernetes manifests
-└── README.md
-```
+
+## Current Deployment Notes
+
+- Local and cloud versions are intentionally separated.
+- HCP Terraform stores the cloud Terraform state remotely.
+- GitHub Actions validates the repo on pull requests and deploys AWS on pushes
+  to `master`.
+- Vercel deploys the cloud frontend separately from `aws-free-tier/frontend-vercel`.
+- The cloud API URL is exported by Terraform as `api_function_url` and is used
+  by Vercel as `API_GATEWAY_URL`.
